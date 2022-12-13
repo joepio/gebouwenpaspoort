@@ -10,9 +10,12 @@ import "./Map.css";
 import { useGeoSearch } from "./useGeoSearch";
 import MapGL, {
   GeolocateControl,
+  Layer,
   MapRef,
   Marker,
   NavigationControl,
+  Source,
+  SymbolLayer,
 } from "react-map-gl";
 import { LngLatBounds } from "mapbox-gl";
 import "mapbox-gl/dist/mapbox-gl.css";
@@ -20,6 +23,9 @@ import { AppContext } from "./App";
 import { GBPObject, GBPObjectTypes } from "./schema";
 import { useSearchBox } from "react-instantsearch-hooks-web";
 import { Header } from "./Header";
+import Mapbox from "react-map-gl/dist/esm/mapbox/mapbox";
+import marker from "./assets/marker.svg";
+import CustomIcons from "./Icons";
 
 const mapboxToken =
   "pk.eyJ1Ijoiam9lcGlvIiwiYSI6ImNqbTIzanZ1bjBkanQza211anFxbWNiM3IifQ.2iBrlCLHaXU79_tY9SVpXA";
@@ -40,31 +46,8 @@ export const startBounds = new LngLatBounds(
   startBoundsInstant.southWest
 );
 
-export function Map() {
-  const { items, refine } = useGeoSearch();
-  const { query } = useSearchBox();
-  const {
-    setCurrent,
-    current,
-    showFilter,
-    showResults,
-    locationFilter,
-    setLocationFilter,
-    setShowFilter,
-    setShowResults,
-  } = useContext(AppContext);
-  const mapRef = useRef<MapRef>();
-  const [viewState, setViewState] = React.useState(mapStartState);
-
-  // if the users toggles the sidebars, resize the map
-  useEffect(() => {
-    if (mapRef.current) {
-      mapRef.current.getMap().resize();
-    }
-  }, [current, showFilter, showResults]);
-
-  // If user changed the query, move the bounds to the new items
-  useEffect(() => {
+const recalcBounds = (mapRef, items) => {
+  () => {
     if (!mapRef.current) {
       return;
     }
@@ -116,7 +99,7 @@ export function Map() {
     });
     // if any is nan, don't do anything
     if (isNaN(lowLat) || isNaN(highLat) || isNaN(lowLng) || isNaN(highLng)) {
-      console.warn("bounds are NaN, not setting bounds")
+      console.warn("bounds are NaN, not setting bounds");
       return;
     }
     let bounds = new LngLatBounds(
@@ -126,7 +109,47 @@ export function Map() {
     mapRef.current?.fitBounds(bounds, {
       padding: 250,
     });
-  }, [query]);
+  };
+};
+
+export function Map() {
+  const { items, refine } = useGeoSearch();
+  const { query } = useSearchBox();
+  const {
+    setCurrent,
+    current,
+    showFilter,
+    showResults,
+    locationFilter,
+    setLocationFilter,
+    setShowFilter,
+    setShowResults,
+  } = useContext(AppContext);
+  const mapRef = useRef<MapRef>();
+  const [viewState, setViewState] = React.useState(mapStartState);
+
+  // initialize map
+  // Load marker icon
+  useEffect(() => {
+    const map = mapRef.current?.getMap();
+    if (map) {
+      CustomIcons.forEach((icon) => {
+        const customIcon = new Image(24, 24);
+        customIcon.onload = () => map.addImage(icon.name, customIcon)
+        customIcon.src = icon.src;
+      });
+    }
+  }, [mapRef.current]);
+
+  // if the users toggles the sidebars, resize the map
+  useEffect(() => {
+    if (mapRef.current) {
+      mapRef.current.getMap().resize();
+    }
+  }, [current, showFilter, showResults]);
+
+  // If user changed the query, move the bounds to the new items
+  useEffect(() => recalcBounds(mapRef, items), [query]);
 
   // If the user moves the map, update the query to filter current area
   const updateBoundsQuery = useCallback((evt) => {
@@ -172,6 +195,46 @@ export function Map() {
     [items, current]
   );
 
+  const data: GeoJSON.FeatureCollection<GeoJSON.Geometry> = useMemo(() => {
+    return {
+      type: "FeatureCollection",
+      features: items.map((item) => {
+        const isCurrent = item.id == current?.id;
+        const handleClick = () => {
+          setCurrent(item as unknown as GBPObject);
+        };
+
+        return {
+          type: "Feature",
+          onClick: { handleClick },
+          geometry: {
+            type: "Point",
+            coordinates: [item._geoloc.lng, item._geoloc.lat],
+          },
+          properties: {
+            id: item.id,
+            type: item["bag-object-type"],
+            color: isCurrent
+              ? "#000000"
+              : GBPObjectTypes["" + item["bag-object-type"]].color,
+            title: item["naam"],
+          },
+        };
+      }),
+    };
+  }, [items]);
+
+  const handleMapClick = useCallback(
+    (evt: mapboxgl.MapLayerMouseEvent) => {
+      if (evt.features) {
+        console.log("features", evt.features[0]);
+      } else {
+        console.log("no feautres", evt);
+      }
+    },
+    [items]
+  );
+
   return (
     <div className="Map__wrapper">
       {!showFilter && (
@@ -197,6 +260,7 @@ export function Map() {
         initialViewState={viewState}
         mapboxAccessToken={mapboxToken}
         // maxBounds={startBounds}
+        onClick={handleMapClick}
         onMoveEnd={updateBoundsQuery}
         style={{ width: "100%", height: "100%", flexBasis: "600px", flex: 1 }}
         mapStyle="mapbox://styles/mapbox/streets-v9"
@@ -205,8 +269,29 @@ export function Map() {
       >
         <NavigationControl position={"bottom-right"} />
         <GeolocateControl position={"bottom-left"} />
-        {markers}
+        <Source type="geojson" data={data}>
+          <Layer {...dataLayer} />
+        </Source>
+        {/* {markers} */}
       </MapGL>
     </div>
   );
 }
+
+// For more information on data-driven styles, see https://www.mapbox.com/help/gl-dds-ref/
+export const dataLayer: SymbolLayer = {
+  id: "points",
+  type: "symbol",
+  source: "points",
+  layout: {
+    // get the title name and icon from the source's properties
+    "icon-image": ["get", "type"],
+    "text-field": ["get", "title"],
+    // "text-color": ["get", "color"],
+    "text-font": ["Open Sans Semibold", "Arial Unicode MS Bold"],
+    // "text-offset": [0, 1.25],
+    "text-anchor": "top",
+    "icon-padding": 1,
+    "icon-size": 0.5,
+  },
+};
